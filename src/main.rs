@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,8 +8,9 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use log::{debug, info};
-use pmcp::{Error, RequestHandlerExtra, Server, ToolHandler};
-use pmcp::types::ToolInfo;
+use pmcp::{Error, RequestHandlerExtra, Server, StdioTransport, ToolHandler};
+use pmcp::shared::{Transport, TransportMessage};
+use pmcp::types::{ClientRequest, Request, RequestId, ToolInfo};
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 
@@ -691,6 +693,74 @@ const TOOL_SPECS: &[ToolSpec] = &[
     },
 ];
 
+#[derive(Debug)]
+struct LoggingTransport<T> {
+    inner: T,
+    init_request_ids: HashSet<RequestId>,
+}
+
+impl<T> LoggingTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            init_request_ids: HashSet::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> Transport for LoggingTransport<T>
+where
+    T: Transport + Send + Sync + std::fmt::Debug,
+{
+    async fn send(&mut self, message: TransportMessage) -> pmcp::Result<()> {
+        if let TransportMessage::Response(resp) = &message {
+            if self.init_request_ids.remove(&resp.id) {
+                info!("mcp initialize response sent: id={}", resp.id);
+            }
+        }
+        self.inner.send(message).await
+    }
+
+    async fn receive(&mut self) -> pmcp::Result<TransportMessage> {
+        let message = self.inner.receive().await?;
+        match &message {
+            TransportMessage::Request { id, request } => {
+                if let Request::Client(client_req) = request {
+                    match client_req.as_ref() {
+                        ClientRequest::Initialize(params) => {
+                            self.init_request_ids.insert(id.clone());
+                            info!(
+                                "mcp initialize received: id={}, protocol_version={}, client={} {}",
+                                id,
+                                params.protocol_version,
+                                params.client_info.name,
+                                params.client_info.version
+                            );
+                        }
+                        _ => {
+                            debug!("mcp request received: id={}", id);
+                        }
+                    }
+                } else {
+                    debug!("mcp server request received: id={}", id);
+                }
+            }
+            TransportMessage::Notification(_) => {
+                debug!("mcp notification received");
+            }
+            TransportMessage::Response(resp) => {
+                debug!("mcp response received: id={}", resp.id);
+            }
+        }
+        Ok(message)
+    }
+
+    async fn close(&mut self) -> pmcp::Result<()> {
+        self.inner.close().await
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -718,7 +788,8 @@ async fn main() -> anyhow::Result<()> {
     debug!("registered {} tools", TOOL_SPECS.len());
 
     let server = builder.build()?;
-    server.run_stdio().await?;
+    let transport = LoggingTransport::new(StdioTransport::new());
+    server.run(transport).await?;
 
     Ok(())
 }
