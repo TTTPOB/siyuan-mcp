@@ -1,10 +1,13 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
+use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use pmcp::{Error, RequestHandlerExtra, Server, ToolHandler};
+use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 
 #[derive(Debug, Parser)]
@@ -58,11 +61,74 @@ impl SiyuanClient {
             Err(_) => Ok(json!({ "status": status.as_u16(), "body": text })),
         }
     }
+
+    async fn post_multipart_value(&self, endpoint: &str, form: Form) -> Result<Value, Error> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut req = self.client.post(url).multipart(form);
+        if let Some(token) = &self.token {
+            req = req.header("Authorization", format!("Token {}", token));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| Error::internal(err.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|err| Error::internal(err.to_string()))?;
+        match serde_json::from_str::<Value>(&text) {
+            Ok(value) => Ok(value),
+            Err(_) => Ok(json!({ "status": status.as_u16(), "body": text })),
+        }
+    }
+
+    async fn post_json_file(&self, endpoint: &str, body: Value) -> Result<Value, Error> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut req = self.client.post(url).json(&body);
+        if let Some(token) = &self.token {
+            req = req.header("Authorization", format!("Token {}", token));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| Error::internal(err.to_string()))?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string());
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|err| Error::internal(err.to_string()))?;
+        if status.is_success() {
+            let encoded = general_purpose::STANDARD.encode(&bytes);
+            Ok(json!({
+                "status": status.as_u16(),
+                "content_type": content_type,
+                "body_base64": encoded
+            }))
+        } else if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            Ok(value)
+        } else {
+            let encoded = general_purpose::STANDARD.encode(&bytes);
+            Ok(json!({
+                "status": status.as_u16(),
+                "content_type": content_type,
+                "body_base64": encoded
+            }))
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum ToolKind {
     Json,
+    AssetUpload,
+    PutFile,
+    GetFile,
 }
 
 #[derive(Clone)]
@@ -88,6 +154,103 @@ impl SiyuanTool {
             _ => Err(Error::validation("arguments must be a JSON object")),
         }
     }
+
+    fn args_as_object(args: Value) -> Result<serde_json::Map<String, Value>, Error> {
+        match args {
+            Value::Object(map) => Ok(map),
+            Value::Null => Ok(serde_json::Map::new()),
+            _ => Err(Error::validation("arguments must be a JSON object")),
+        }
+    }
+
+    fn required_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, Error> {
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .ok_or_else(|| Error::validation(format!("missing or invalid `{}`", key)))
+    }
+
+    fn optional_string(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+    }
+
+    fn optional_bool(map: &serde_json::Map<String, Value>, key: &str) -> Option<bool> {
+        map.get(key).and_then(|value| value.as_bool())
+    }
+
+    fn optional_u64(map: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+        map.get(key).and_then(|value| value.as_u64())
+    }
+
+    fn string_array(map: &serde_json::Map<String, Value>, key: &str) -> Result<Vec<String>, Error> {
+        let values = map
+            .get(key)
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| Error::validation(format!("missing or invalid `{}`", key)))?;
+        let mut out = Vec::with_capacity(values.len());
+        for value in values {
+            let item = value
+                .as_str()
+                .ok_or_else(|| Error::validation(format!("invalid `{}` entry", key)))?;
+            out.push(item.to_string());
+        }
+        Ok(out)
+    }
+
+    async fn file_part(file_path: &str) -> Result<Part, Error> {
+        let bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|err| Error::internal(format!("read file {}: {}", file_path, err)))?;
+        let filename = Path::new(file_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+            .to_string();
+        Ok(Part::bytes(bytes).file_name(filename))
+    }
+
+    async fn handle_asset_upload(&self, args: Value) -> Result<Value, Error> {
+        let map = Self::args_as_object(args)?;
+        let assets_dir =
+            Self::optional_string(&map, "assets_dir_path").unwrap_or_else(|| "/assets/".to_string());
+        let files = Self::string_array(&map, "files")?;
+        let mut form = Form::new().text("assetsDirPath", assets_dir);
+        for file_path in files {
+            let part = Self::file_part(&file_path).await?;
+            form = form.part("file[]", part);
+        }
+        self.client.post_multipart_value(self.endpoint, form).await
+    }
+
+    async fn handle_put_file(&self, args: Value) -> Result<Value, Error> {
+        let map = Self::args_as_object(args)?;
+        let path = Self::required_string(&map, "path")?;
+        let is_dir = Self::optional_bool(&map, "is_dir");
+        let mod_time = Self::optional_u64(&map, "mod_time");
+        let mut form = Form::new().text("path", path);
+        if let Some(value) = is_dir {
+            form = form.text("isDir", value.to_string());
+        }
+        if let Some(value) = mod_time {
+            form = form.text("modTime", value.to_string());
+        }
+        let is_dir_flag = is_dir.unwrap_or(false);
+        if !is_dir_flag {
+            let file_path = Self::required_string(&map, "file_path")?;
+            let part = Self::file_part(&file_path).await?;
+            form = form.part("file", part);
+        }
+        self.client.post_multipart_value(self.endpoint, form).await
+    }
+
+    async fn handle_get_file(&self, args: Value) -> Result<Value, Error> {
+        let map = Self::args_as_object(args)?;
+        let path = Self::required_string(&map, "path")?;
+        let body = json!({ "path": path });
+        self.client.post_json_file(self.endpoint, body).await
+    }
 }
 
 #[async_trait]
@@ -98,6 +261,9 @@ impl ToolHandler for SiyuanTool {
                 let body = Self::ensure_object(args)?;
                 self.client.post_json_value(self.endpoint, body).await
             }
+            ToolKind::AssetUpload => self.handle_asset_upload(args).await,
+            ToolKind::PutFile => self.handle_put_file(args).await,
+            ToolKind::GetFile => self.handle_get_file(args).await,
         }
     }
 }
@@ -205,6 +371,11 @@ const TOOL_SPECS: &[ToolSpec] = &[
         kind: ToolKind::Json,
     },
     ToolSpec {
+        name: "siyuan_asset_upload",
+        endpoint: "/api/asset/upload",
+        kind: ToolKind::AssetUpload,
+    },
+    ToolSpec {
         name: "siyuan_block_insert",
         endpoint: "/api/block/insertBlock",
         kind: ToolKind::Json,
@@ -288,6 +459,16 @@ const TOOL_SPECS: &[ToolSpec] = &[
         name: "siyuan_template_render_sprig",
         endpoint: "/api/template/renderSprig",
         kind: ToolKind::Json,
+    },
+    ToolSpec {
+        name: "siyuan_file_get",
+        endpoint: "/api/file/getFile",
+        kind: ToolKind::GetFile,
+    },
+    ToolSpec {
+        name: "siyuan_file_put",
+        endpoint: "/api/file/putFile",
+        kind: ToolKind::PutFile,
     },
     ToolSpec {
         name: "siyuan_file_remove",
