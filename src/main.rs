@@ -782,7 +782,11 @@ impl ServerHandler for SiyuanServer {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .init();
     let args = Args::parse();
     info!(
         "starting siyuan-mcp: base_url={}, timeout_ms={}, token_set={}",
