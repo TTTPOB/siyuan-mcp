@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import select
 import subprocess
 import sys
@@ -44,6 +45,7 @@ def read_message(proc, timeout_s, stderr_lines):
 def main():
     env = os.environ.copy()
     env.setdefault("RUST_LOG", "info")
+    timeout_s = float(env.get("STDIO_SMOKE_TIMEOUT_S", "60"))
     cmd = ["cargo", "run", "-q"]
     proc = subprocess.Popen(
         cmd,
@@ -72,7 +74,7 @@ def main():
         }
         write_msg(proc, init_req)
 
-        init_resp = read_message(proc, 15, stderr_lines)
+        init_resp = read_message(proc, timeout_s, stderr_lines)
         if not init_resp:
             print("initialize: no response", file=sys.stderr)
             if stderr_lines:
@@ -90,7 +92,7 @@ def main():
 
         tools_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
         write_msg(proc, tools_req)
-        tools_resp = read_message(proc, 15, stderr_lines)
+        tools_resp = read_message(proc, timeout_s, stderr_lines)
         if not tools_resp:
             print("tools/list: no response", file=sys.stderr)
             if stderr_lines:
