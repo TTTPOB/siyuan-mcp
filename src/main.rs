@@ -1,16 +1,24 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use log::{debug, info};
-use pmcp::{Error, RequestHandlerExtra, Server, StdioTransport, ToolHandler};
-use pmcp::shared::{Transport, TransportMessage};
-use pmcp::types::{ClientRequest, Request, RequestId, ToolInfo};
+use rmcp::{
+    ErrorData as McpError,
+    RoleServer,
+    ServerHandler,
+    ServiceExt,
+    model::{
+        CallToolRequestParam, CallToolResult, Content, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParam, ServerCapabilities, ServerInfo, Tool,
+    },
+    service::RequestContext,
+    transport::stdio,
+};
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 
@@ -45,7 +53,7 @@ impl SiyuanClient {
         })
     }
 
-    async fn post_json_value(&self, endpoint: &str, body: Value) -> Result<Value, Error> {
+    async fn post_json_value(&self, endpoint: &str, body: Value) -> Result<Value, McpError> {
         let url = format!("{}{}", self.base_url, endpoint);
         let mut req = self.client.post(url).json(&body);
         if let Some(token) = &self.token {
@@ -54,19 +62,19 @@ impl SiyuanClient {
         let resp = req
             .send()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         match serde_json::from_str::<Value>(&text) {
             Ok(value) => Ok(value),
             Err(_) => Ok(json!({ "status": status.as_u16(), "body": text })),
         }
     }
 
-    async fn post_multipart_value(&self, endpoint: &str, form: Form) -> Result<Value, Error> {
+    async fn post_multipart_value(&self, endpoint: &str, form: Form) -> Result<Value, McpError> {
         let url = format!("{}{}", self.base_url, endpoint);
         let mut req = self.client.post(url).multipart(form);
         if let Some(token) = &self.token {
@@ -75,19 +83,19 @@ impl SiyuanClient {
         let resp = req
             .send()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         match serde_json::from_str::<Value>(&text) {
             Ok(value) => Ok(value),
             Err(_) => Ok(json!({ "status": status.as_u16(), "body": text })),
         }
     }
 
-    async fn post_json_file(&self, endpoint: &str, body: Value) -> Result<Value, Error> {
+    async fn post_json_file(&self, endpoint: &str, body: Value) -> Result<Value, McpError> {
         let url = format!("{}{}", self.base_url, endpoint);
         let mut req = self.client.post(url).json(&body);
         if let Some(token) = &self.token {
@@ -96,7 +104,7 @@ impl SiyuanClient {
         let resp = req
             .send()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         let status = resp.status();
         let content_type = resp
             .headers()
@@ -106,7 +114,7 @@ impl SiyuanClient {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|err| Error::internal(err.to_string()))?;
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         if status.is_success() {
             let encoded = general_purpose::STANDARD.encode(&bytes);
             Ok(json!({
@@ -138,46 +146,51 @@ enum ToolKind {
 #[derive(Clone)]
 struct SiyuanTool {
     client: Arc<SiyuanClient>,
-    name: &'static str,
     endpoint: &'static str,
     kind: ToolKind,
-    description: &'static str,
-    input_schema: Value,
 }
 
 impl SiyuanTool {
     fn new(client: Arc<SiyuanClient>, spec: &ToolSpec) -> Self {
         Self {
             client,
-            name: spec.name,
             endpoint: spec.endpoint,
             kind: spec.kind,
-            description: spec.description,
-            input_schema: parse_schema(spec.schema),
         }
     }
 
-    fn ensure_object(args: Value) -> Result<Value, Error> {
+    fn ensure_object(args: Value) -> Result<Value, McpError> {
         match args {
             Value::Object(_) => Ok(args),
             Value::Null => Ok(json!({})),
-            _ => Err(Error::validation("arguments must be a JSON object")),
+            _ => Err(McpError::invalid_params(
+                "arguments must be a JSON object",
+                None,
+            )),
         }
     }
 
-    fn args_as_object(args: Value) -> Result<serde_json::Map<String, Value>, Error> {
+    fn args_as_object(args: Value) -> Result<serde_json::Map<String, Value>, McpError> {
         match args {
             Value::Object(map) => Ok(map),
             Value::Null => Ok(serde_json::Map::new()),
-            _ => Err(Error::validation("arguments must be a JSON object")),
+            _ => Err(McpError::invalid_params(
+                "arguments must be a JSON object",
+                None,
+            )),
         }
     }
 
-    fn required_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, Error> {
+    fn required_string(
+        map: &serde_json::Map<String, Value>,
+        key: &str,
+    ) -> Result<String, McpError> {
         map.get(key)
             .and_then(|value| value.as_str())
             .map(|value| value.to_string())
-            .ok_or_else(|| Error::validation(format!("missing or invalid `{}`", key)))
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("missing or invalid `{}`", key), None)
+            })
     }
 
     fn optional_string(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -194,25 +207,30 @@ impl SiyuanTool {
         map.get(key).and_then(|value| value.as_u64())
     }
 
-    fn string_array(map: &serde_json::Map<String, Value>, key: &str) -> Result<Vec<String>, Error> {
+    fn string_array(
+        map: &serde_json::Map<String, Value>,
+        key: &str,
+    ) -> Result<Vec<String>, McpError> {
         let values = map
             .get(key)
             .and_then(|value| value.as_array())
-            .ok_or_else(|| Error::validation(format!("missing or invalid `{}`", key)))?;
+            .ok_or_else(|| McpError::invalid_params(format!("missing or invalid `{}`", key), None))?;
         let mut out = Vec::with_capacity(values.len());
         for value in values {
             let item = value
                 .as_str()
-                .ok_or_else(|| Error::validation(format!("invalid `{}` entry", key)))?;
+                .ok_or_else(|| McpError::invalid_params(format!("invalid `{}` entry", key), None))?;
             out.push(item.to_string());
         }
         Ok(out)
     }
 
-    async fn file_part(file_path: &str) -> Result<Part, Error> {
+    async fn file_part(file_path: &str) -> Result<Part, McpError> {
         let bytes = tokio::fs::read(file_path)
             .await
-            .map_err(|err| Error::internal(format!("read file {}: {}", file_path, err)))?;
+            .map_err(|err| {
+                McpError::internal_error(format!("read file {}: {}", file_path, err), None)
+            })?;
         let filename = Path::new(file_path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -221,7 +239,7 @@ impl SiyuanTool {
         Ok(Part::bytes(bytes).file_name(filename))
     }
 
-    async fn handle_asset_upload(&self, args: Value) -> Result<Value, Error> {
+    async fn handle_asset_upload(&self, args: Value) -> Result<Value, McpError> {
         let map = Self::args_as_object(args)?;
         let assets_dir =
             Self::optional_string(&map, "assets_dir_path").unwrap_or_else(|| "/assets/".to_string());
@@ -234,7 +252,7 @@ impl SiyuanTool {
         self.client.post_multipart_value(self.endpoint, form).await
     }
 
-    async fn handle_put_file(&self, args: Value) -> Result<Value, Error> {
+    async fn handle_put_file(&self, args: Value) -> Result<Value, McpError> {
         let map = Self::args_as_object(args)?;
         let path = Self::required_string(&map, "path")?;
         let is_dir = Self::optional_bool(&map, "is_dir");
@@ -255,17 +273,13 @@ impl SiyuanTool {
         self.client.post_multipart_value(self.endpoint, form).await
     }
 
-    async fn handle_get_file(&self, args: Value) -> Result<Value, Error> {
+    async fn handle_get_file(&self, args: Value) -> Result<Value, McpError> {
         let map = Self::args_as_object(args)?;
         let path = Self::required_string(&map, "path")?;
         let body = json!({ "path": path });
         self.client.post_json_file(self.endpoint, body).await
     }
-}
-
-#[async_trait]
-impl ToolHandler for SiyuanTool {
-    async fn handle(&self, args: Value, _extra: RequestHandlerExtra) -> Result<Value, Error> {
+    async fn handle(&self, args: Value) -> Result<Value, McpError> {
         match self.kind {
             ToolKind::Json => {
                 let body = Self::ensure_object(args)?;
@@ -275,14 +289,6 @@ impl ToolHandler for SiyuanTool {
             ToolKind::PutFile => self.handle_put_file(args).await,
             ToolKind::GetFile => self.handle_get_file(args).await,
         }
-    }
-
-    fn metadata(&self) -> Option<ToolInfo> {
-        Some(ToolInfo::new(
-            self.name,
-            Some(self.description.to_string()),
-            self.input_schema.clone(),
-        ))
     }
 }
 
@@ -294,8 +300,11 @@ struct ToolSpec {
     schema: &'static str,
 }
 
-fn parse_schema(schema: &'static str) -> Value {
-    serde_json::from_str(schema).unwrap_or_else(|_| json!({ "type": "object" }))
+fn parse_schema(schema: &'static str) -> JsonObject {
+    match serde_json::from_str::<Value>(schema) {
+        Ok(Value::Object(map)) => map,
+        _ => JsonObject::default(),
+    }
 }
 
 const SCHEMA_EMPTY: &str =
@@ -693,71 +702,81 @@ const TOOL_SPECS: &[ToolSpec] = &[
     },
 ];
 
-#[derive(Debug)]
-struct LoggingTransport<T> {
-    inner: T,
-    init_request_ids: HashSet<RequestId>,
+#[derive(Clone)]
+struct SiyuanServer {
+    tools: Arc<Vec<Tool>>,
+    tool_handlers: Arc<HashMap<&'static str, SiyuanTool>>,
 }
 
-impl<T> LoggingTransport<T> {
-    fn new(inner: T) -> Self {
+impl SiyuanServer {
+    fn new(client: Arc<SiyuanClient>) -> Self {
+        let mut tools = Vec::new();
+        let mut handlers = HashMap::new();
+        for spec in TOOL_SPECS {
+            let handler = SiyuanTool::new(client.clone(), spec);
+            let schema = parse_schema(spec.schema);
+            let tool = Tool::new(spec.name, spec.description, Arc::new(schema));
+            tools.push(tool);
+            handlers.insert(spec.name, handler);
+        }
+        debug!("registered {} tools", tools.len());
         Self {
-            inner,
-            init_request_ids: HashSet::new(),
+            tools: Arc::new(tools),
+            tool_handlers: Arc::new(handlers),
         }
+    }
+
+    async fn handle_tool_call(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        let handler = self.tool_handlers.get(name).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown tool: {}", name), None)
+        })?;
+        handler.handle(args).await
     }
 }
 
-#[async_trait]
-impl<T> Transport for LoggingTransport<T>
-where
-    T: Transport + Send + Sync + std::fmt::Debug,
-{
-    async fn send(&mut self, message: TransportMessage) -> pmcp::Result<()> {
-        if let TransportMessage::Response(resp) = &message {
-            if self.init_request_ids.remove(&resp.id) {
-                info!("mcp initialize response sent: id={}", resp.id);
-            }
+impl ServerHandler for SiyuanServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation {
+                name: "siyuan-mcp".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
         }
-        self.inner.send(message).await
     }
 
-    async fn receive(&mut self) -> pmcp::Result<TransportMessage> {
-        let message = self.inner.receive().await?;
-        match &message {
-            TransportMessage::Request { id, request } => {
-                if let Request::Client(client_req) = request {
-                    match client_req.as_ref() {
-                        ClientRequest::Initialize(params) => {
-                            self.init_request_ids.insert(id.clone());
-                            info!(
-                                "mcp initialize received: id={}, protocol_version={}, client={} {}",
-                                id,
-                                params.protocol_version,
-                                params.client_info.name,
-                                params.client_info.version
-                            );
-                        }
-                        _ => {
-                            debug!("mcp request received: id={}", id);
-                        }
-                    }
-                } else {
-                    debug!("mcp server request received: id={}", id);
-                }
-            }
-            TransportMessage::Notification(_) => {
-                debug!("mcp notification received");
-            }
-            TransportMessage::Response(resp) => {
-                debug!("mcp response received: id={}", resp.id);
-            }
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        let tools = self.tools.clone();
+        async move {
+            Ok(ListToolsResult {
+                tools: (*tools).clone(),
+                next_cursor: None,
+            })
         }
-        Ok(message)
     }
 
-    async fn close(&mut self) -> pmcp::Result<()> {
-        self.inner.close().await
+    fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        let server = self.clone();
+        async move {
+            let name = request.name.as_ref();
+            let args = request
+                .arguments
+                .map(Value::Object)
+                .unwrap_or(Value::Null);
+            let result = server.handle_tool_call(name, args).await?;
+            let content = Content::json(result)?;
+            Ok(CallToolResult::success(vec![content]))
+        }
     }
 }
 
@@ -777,19 +796,9 @@ async fn main() -> anyhow::Result<()> {
         args.timeout_ms,
     )?);
 
-    let mut builder = Server::builder()
-        .name("siyuan-mcp")
-        .version(env!("CARGO_PKG_VERSION"));
-
-    for spec in TOOL_SPECS {
-        let tool = SiyuanTool::new(client.clone(), spec);
-        builder = builder.tool(spec.name, tool);
-    }
-    debug!("registered {} tools", TOOL_SPECS.len());
-
-    let server = builder.build()?;
-    let transport = LoggingTransport::new(StdioTransport::new());
-    server.run(transport).await?;
+    let server = SiyuanServer::new(client);
+    let running = server.serve(stdio()).await?;
+    running.waiting().await?;
 
     Ok(())
 }
