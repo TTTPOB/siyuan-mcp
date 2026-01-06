@@ -134,3 +134,7 @@ scanned 699 blocks, updated 146, replacements 187
 
 - 对 SQL 结果做**显式分页**（`LIMIT/OFFSET` 或 keyset 分页）。
 - 对“会更新数据”的扫描，优先用 keyset 分页避免 offset 漂移。
+
+## AIGC 代码说明
+
+本仓库包含部分由 AIGC 协助生成的脚本与文档，用于加速开发与整理。请在使用前自行审阅，并根据实际需求做适配与测试。
