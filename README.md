@@ -93,3 +93,44 @@ cargo run --release -- \
 ## 备注
 
 - 所有工具的详细输入 schema 已内置在 MCP 工具元数据中，调用方可根据 schema 自动提示。
+
+## 已知怪异行为：SQL 查询疑似隐式分页（约 64 条）
+
+在实际脚本处理中发现：即使 SQL 没写 `LIMIT`，`/api/query/sql` 也可能只返回约 64 条记录（表现为“每次运行只处理 64 条，反复跑几次才全部完成”）。这会导致一次性扫描/替换只覆盖部分数据。
+
+### 示例 1：日志表现
+
+```text
+python convert_logseq_journals.py
+found 64 date docs under /logseq_journals
+processed 64, skipped 0 (existing 0, invalid 0)
+
+python convert_logseq_journals.py
+found 64 date docs under /logseq_journals
+processed 64, skipped 0 (existing 0, invalid 0)
+
+python convert_logseq_journals.py
+found 23 date docs under /logseq_journals
+processed 23, skipped 0 (existing 0, invalid 0)
+```
+
+### 示例 2：替换脚本的分页修复
+
+初版脚本在构建日期映射时只加载到 64 条，导致替换几乎不生效：
+
+```text
+journal dates loaded: 64
+scanned 699 blocks, updated 0, replacements 0
+```
+
+修复后改为分页加载全部结果：
+
+```text
+journal dates loaded: 212
+scanned 699 blocks, updated 146, replacements 187
+```
+
+### 建议
+
+- 对 SQL 结果做**显式分页**（`LIMIT/OFFSET` 或 keyset 分页）。
+- 对“会更新数据”的扫描，优先用 keyset 分页避免 offset 漂移。
