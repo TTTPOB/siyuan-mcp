@@ -6,6 +6,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
+use log::{debug, info};
 use pmcp::{Error, RequestHandlerExtra, Server, ToolHandler};
 use pmcp::types::ToolInfo;
 use reqwest::multipart::{Form, Part};
@@ -692,7 +693,14 @@ const TOOL_SPECS: &[ToolSpec] = &[
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
     let args = Args::parse();
+    info!(
+        "starting siyuan-mcp: base_url={}, timeout_ms={}, token_set={}",
+        args.base_url,
+        args.timeout_ms,
+        args.token.is_some()
+    );
     let client = Arc::new(SiyuanClient::new(
         args.base_url,
         args.token,
@@ -707,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
         let tool = SiyuanTool::new(client.clone(), spec);
         builder = builder.tool(spec.name, tool);
     }
+    debug!("registered {} tools", TOOL_SPECS.len());
 
     let server = builder.build()?;
     server.run_stdio().await?;
