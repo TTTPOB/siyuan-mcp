@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use pmcp::{Error, RequestHandlerExtra, Server, ToolHandler};
+use pmcp::types::ToolInfo;
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 
@@ -134,16 +135,22 @@ enum ToolKind {
 #[derive(Clone)]
 struct SiyuanTool {
     client: Arc<SiyuanClient>,
+    name: &'static str,
     endpoint: &'static str,
     kind: ToolKind,
+    description: &'static str,
+    input_schema: Value,
 }
 
 impl SiyuanTool {
-    fn new(client: Arc<SiyuanClient>, endpoint: &'static str, kind: ToolKind) -> Self {
+    fn new(client: Arc<SiyuanClient>, spec: &ToolSpec) -> Self {
         Self {
             client,
-            endpoint,
-            kind,
+            name: spec.name,
+            endpoint: spec.endpoint,
+            kind: spec.kind,
+            description: spec.description,
+            input_schema: parse_schema(spec.schema),
         }
     }
 
@@ -266,269 +273,420 @@ impl ToolHandler for SiyuanTool {
             ToolKind::GetFile => self.handle_get_file(args).await,
         }
     }
+
+    fn metadata(&self) -> Option<ToolInfo> {
+        Some(ToolInfo::new(
+            self.name,
+            Some(self.description.to_string()),
+            self.input_schema.clone(),
+        ))
+    }
 }
 
 struct ToolSpec {
     name: &'static str,
     endpoint: &'static str,
     kind: ToolKind,
+    description: &'static str,
+    schema: &'static str,
 }
+
+fn parse_schema(schema: &'static str) -> Value {
+    serde_json::from_str(schema).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
+const SCHEMA_EMPTY: &str =
+    r#"{"type":"object","properties":{},"additionalProperties":false}"#;
+const SCHEMA_NOTEBOOK_ID: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"}},"required":["notebook"],"additionalProperties":true}"#;
+const SCHEMA_NOTEBOOK_ID_NAME: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"name":{"type":"string","description":"Notebook name"}},"required":["notebook","name"],"additionalProperties":true}"#;
+const SCHEMA_NOTEBOOK_CREATE: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"Notebook name"}},"required":["name"],"additionalProperties":true}"#;
+const SCHEMA_NOTEBOOK_CONF: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"conf":{"type":"object","description":"Notebook config object"}},"required":["notebook","conf"],"additionalProperties":true}"#;
+const SCHEMA_DOC_CREATE_MD: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"path":{"type":"string","description":"Document path (hpath)"},"markdown":{"type":"string","description":"GFM markdown content"}},"required":["notebook","path","markdown"],"additionalProperties":true}"#;
+const SCHEMA_DOC_RENAME: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"path":{"type":"string","description":"Document path"},"title":{"type":"string","description":"New document title"}},"required":["notebook","path","title"],"additionalProperties":true}"#;
+const SCHEMA_DOC_RENAME_BY_ID: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Document ID"},"title":{"type":"string","description":"New document title"}},"required":["id","title"],"additionalProperties":true}"#;
+const SCHEMA_DOC_REMOVE: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"path":{"type":"string","description":"Document path"}},"required":["notebook","path"],"additionalProperties":true}"#;
+const SCHEMA_ID_ONLY: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Block or document ID"}},"required":["id"],"additionalProperties":true}"#;
+const SCHEMA_DOC_MOVE: &str = r#"{"type":"object","properties":{"fromPaths":{"type":"array","items":{"type":"string"},"description":"Source document paths"},"toNotebook":{"type":"string","description":"Target notebook ID"},"toPath":{"type":"string","description":"Target path"}},"required":["fromPaths","toNotebook","toPath"],"additionalProperties":true}"#;
+const SCHEMA_DOC_MOVE_BY_ID: &str = r#"{"type":"object","properties":{"fromIDs":{"type":"array","items":{"type":"string"},"description":"Source document IDs"},"toID":{"type":"string","description":"Target parent doc ID or notebook ID"}},"required":["fromIDs","toID"],"additionalProperties":true}"#;
+const SCHEMA_GET_HPATH_BY_PATH: &str = r#"{"type":"object","properties":{"notebook":{"type":"string","description":"Notebook ID"},"path":{"type":"string","description":"Document path"}},"required":["notebook","path"],"additionalProperties":true}"#;
+const SCHEMA_GET_IDS_BY_HPATH: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Human-readable path"},"notebook":{"type":"string","description":"Notebook ID"}},"required":["path","notebook"],"additionalProperties":true}"#;
+const SCHEMA_BLOCK_INSERT: &str = r#"{"type":"object","properties":{"dataType":{"type":"string","description":"markdown or dom"},"data":{"type":"string","description":"Content to insert"},"nextID":{"type":"string","description":"Next block ID"},"previousID":{"type":"string","description":"Previous block ID"},"parentID":{"type":"string","description":"Parent block ID"}},"required":["dataType","data"],"additionalProperties":true}"#;
+const SCHEMA_BLOCK_PREPEND: &str = r#"{"type":"object","properties":{"dataType":{"type":"string","description":"markdown or dom"},"data":{"type":"string","description":"Content to insert"},"parentID":{"type":"string","description":"Parent block ID"}},"required":["dataType","data","parentID"],"additionalProperties":true}"#;
+const SCHEMA_BLOCK_UPDATE: &str = r#"{"type":"object","properties":{"dataType":{"type":"string","description":"markdown or dom"},"data":{"type":"string","description":"Updated content"},"id":{"type":"string","description":"Block ID"}},"required":["dataType","data","id"],"additionalProperties":true}"#;
+const SCHEMA_BLOCK_MOVE: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Block ID"},"previousID":{"type":"string","description":"Previous block ID"},"parentID":{"type":"string","description":"Parent block ID"}},"required":["id"],"additionalProperties":true}"#;
+const SCHEMA_BLOCK_TRANSFER_REF: &str = r#"{"type":"object","properties":{"fromID":{"type":"string","description":"Def block ID"},"toID":{"type":"string","description":"Target block ID"},"refIDs":{"type":"array","items":{"type":"string"},"description":"Optional ref block IDs"}},"required":["fromID","toID"],"additionalProperties":true}"#;
+const SCHEMA_ATTR_SET: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Block ID"},"attrs":{"type":"object","description":"Attributes map"}},"required":["id","attrs"],"additionalProperties":true}"#;
+const SCHEMA_SQL_QUERY: &str = r#"{"type":"object","properties":{"stmt":{"type":"string","description":"SQL statement"}},"required":["stmt"],"additionalProperties":true}"#;
+const SCHEMA_TEMPLATE_RENDER: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Document ID"},"path":{"type":"string","description":"Template file absolute path"}},"required":["id","path"],"additionalProperties":true}"#;
+const SCHEMA_TEMPLATE_RENDER_SPRIG: &str = r#"{"type":"object","properties":{"template":{"type":"string","description":"Template content"}},"required":["template"],"additionalProperties":true}"#;
+const SCHEMA_FILE_PATH: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Path under workspace"}},"required":["path"],"additionalProperties":true}"#;
+const SCHEMA_FILE_PUT: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Path under workspace"},"is_dir":{"type":"boolean","description":"Create directory only"},"mod_time":{"type":"integer","description":"Unix time (seconds)"},"file_path":{"type":"string","description":"Local file path to upload"}},"required":["path"],"additionalProperties":true}"#;
+const SCHEMA_FILE_RENAME: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Path under workspace"},"newPath":{"type":"string","description":"New path under workspace"}},"required":["path","newPath"],"additionalProperties":true}"#;
+const SCHEMA_FILE_READ_DIR: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory path under workspace"}},"required":["path"],"additionalProperties":true}"#;
+const SCHEMA_EXPORT_MD: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Doc block ID"}},"required":["id"],"additionalProperties":true}"#;
+const SCHEMA_EXPORT_RESOURCES: &str = r#"{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"description":"Paths to export"},"name":{"type":"string","description":"Optional zip name"}},"required":["paths"],"additionalProperties":true}"#;
+const SCHEMA_PANDOC: &str = r#"{"type":"object","properties":{"dir":{"type":"string","description":"Working directory name"},"args":{"type":"array","items":{"type":"string"},"description":"Pandoc CLI args"}},"required":["dir","args"],"additionalProperties":true}"#;
+const SCHEMA_NOTIFY: &str = r#"{"type":"object","properties":{"msg":{"type":"string","description":"Message text"},"timeout":{"type":"integer","description":"Timeout in ms"}},"required":["msg"],"additionalProperties":true}"#;
+const SCHEMA_NETWORK_FORWARD_PROXY: &str = r#"{"type":"object","properties":{"url":{"type":"string","description":"Target URL"},"method":{"type":"string","description":"HTTP method"},"timeout":{"type":"integer","description":"Timeout in ms"},"contentType":{"type":"string","description":"Content-Type"},"headers":{"type":"array","items":{"type":"object"},"description":"Headers list"},"payload":{"type":"object","description":"Payload object or string"},"payloadEncoding":{"type":"string","description":"Payload encoding"},"responseEncoding":{"type":"string","description":"Response body encoding"}},"required":["url"],"additionalProperties":true}"#;
+const SCHEMA_ASSET_UPLOAD: &str = r#"{"type":"object","properties":{"assets_dir_path":{"type":"string","description":"Target assets dir (e.g. /assets/)"},"files":{"type":"array","items":{"type":"string"},"description":"Local file paths"}},"required":["files"],"additionalProperties":true}"#;
 
 const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         name: "siyuan_notebook_ls",
         endpoint: "/api/notebook/lsNotebooks",
         kind: ToolKind::Json,
+        description: "List notebooks. No parameters. Use to obtain notebook IDs.",
+        schema: SCHEMA_EMPTY,
     },
     ToolSpec {
         name: "siyuan_notebook_open",
         endpoint: "/api/notebook/openNotebook",
         kind: ToolKind::Json,
+        description: "Open a notebook by ID.",
+        schema: SCHEMA_NOTEBOOK_ID,
     },
     ToolSpec {
         name: "siyuan_notebook_close",
         endpoint: "/api/notebook/closeNotebook",
         kind: ToolKind::Json,
+        description: "Close a notebook by ID.",
+        schema: SCHEMA_NOTEBOOK_ID,
     },
     ToolSpec {
         name: "siyuan_notebook_rename",
         endpoint: "/api/notebook/renameNotebook",
         kind: ToolKind::Json,
+        description: "Rename a notebook by ID.",
+        schema: SCHEMA_NOTEBOOK_ID_NAME,
     },
     ToolSpec {
         name: "siyuan_notebook_create",
         endpoint: "/api/notebook/createNotebook",
         kind: ToolKind::Json,
+        description: "Create a new notebook.",
+        schema: SCHEMA_NOTEBOOK_CREATE,
     },
     ToolSpec {
         name: "siyuan_notebook_remove",
         endpoint: "/api/notebook/removeNotebook",
         kind: ToolKind::Json,
+        description: "Remove a notebook by ID.",
+        schema: SCHEMA_NOTEBOOK_ID,
     },
     ToolSpec {
         name: "siyuan_notebook_get_conf",
         endpoint: "/api/notebook/getNotebookConf",
         kind: ToolKind::Json,
+        description: "Fetch notebook configuration by ID.",
+        schema: SCHEMA_NOTEBOOK_ID,
     },
     ToolSpec {
         name: "siyuan_notebook_set_conf",
         endpoint: "/api/notebook/setNotebookConf",
         kind: ToolKind::Json,
+        description: "Save notebook configuration by ID.",
+        schema: SCHEMA_NOTEBOOK_CONF,
     },
     ToolSpec {
         name: "siyuan_doc_create_md",
         endpoint: "/api/filetree/createDocWithMd",
         kind: ToolKind::Json,
+        description: "Create a document with Markdown content.",
+        schema: SCHEMA_DOC_CREATE_MD,
     },
     ToolSpec {
         name: "siyuan_doc_rename",
         endpoint: "/api/filetree/renameDoc",
         kind: ToolKind::Json,
+        description: "Rename a document by notebook + path.",
+        schema: SCHEMA_DOC_RENAME,
     },
     ToolSpec {
         name: "siyuan_doc_rename_by_id",
         endpoint: "/api/filetree/renameDocByID",
         kind: ToolKind::Json,
+        description: "Rename a document by ID.",
+        schema: SCHEMA_DOC_RENAME_BY_ID,
     },
     ToolSpec {
         name: "siyuan_doc_remove",
         endpoint: "/api/filetree/removeDoc",
         kind: ToolKind::Json,
+        description: "Remove a document by notebook + path.",
+        schema: SCHEMA_DOC_REMOVE,
     },
     ToolSpec {
         name: "siyuan_doc_remove_by_id",
         endpoint: "/api/filetree/removeDocByID",
         kind: ToolKind::Json,
+        description: "Remove a document by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_doc_move",
         endpoint: "/api/filetree/moveDocs",
         kind: ToolKind::Json,
+        description: "Move documents by source paths to a target notebook/path.",
+        schema: SCHEMA_DOC_MOVE,
     },
     ToolSpec {
         name: "siyuan_doc_move_by_id",
         endpoint: "/api/filetree/moveDocsByID",
         kind: ToolKind::Json,
+        description: "Move documents by IDs to a target parent ID or notebook ID.",
+        schema: SCHEMA_DOC_MOVE_BY_ID,
     },
     ToolSpec {
         name: "siyuan_doc_get_hpath_by_path",
         endpoint: "/api/filetree/getHPathByPath",
         kind: ToolKind::Json,
+        description: "Get human-readable path from notebook + storage path.",
+        schema: SCHEMA_GET_HPATH_BY_PATH,
     },
     ToolSpec {
         name: "siyuan_doc_get_hpath_by_id",
         endpoint: "/api/filetree/getHPathByID",
         kind: ToolKind::Json,
+        description: "Get human-readable path from block/document ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_doc_get_path_by_id",
         endpoint: "/api/filetree/getPathByID",
         kind: ToolKind::Json,
+        description: "Get storage path and notebook ID from block/document ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_doc_get_ids_by_hpath",
         endpoint: "/api/filetree/getIDsByHPath",
         kind: ToolKind::Json,
+        description: "Get IDs from human-readable path + notebook ID.",
+        schema: SCHEMA_GET_IDS_BY_HPATH,
     },
     ToolSpec {
         name: "siyuan_asset_upload",
         endpoint: "/api/asset/upload",
         kind: ToolKind::AssetUpload,
+        description: "Upload assets from local files. Uses multipart. Params: assets_dir_path, files[].",
+        schema: SCHEMA_ASSET_UPLOAD,
     },
     ToolSpec {
         name: "siyuan_block_insert",
         endpoint: "/api/block/insertBlock",
         kind: ToolKind::Json,
+        description: "Insert blocks using nextID/previousID/parentID anchors.",
+        schema: SCHEMA_BLOCK_INSERT,
     },
     ToolSpec {
         name: "siyuan_block_prepend",
         endpoint: "/api/block/prependBlock",
         kind: ToolKind::Json,
+        description: "Prepend blocks to parentID.",
+        schema: SCHEMA_BLOCK_PREPEND,
     },
     ToolSpec {
         name: "siyuan_block_append",
         endpoint: "/api/block/appendBlock",
         kind: ToolKind::Json,
+        description: "Append blocks to parentID.",
+        schema: SCHEMA_BLOCK_PREPEND,
     },
     ToolSpec {
         name: "siyuan_block_update",
         endpoint: "/api/block/updateBlock",
         kind: ToolKind::Json,
+        description: "Update a block by ID.",
+        schema: SCHEMA_BLOCK_UPDATE,
     },
     ToolSpec {
         name: "siyuan_block_delete",
         endpoint: "/api/block/deleteBlock",
         kind: ToolKind::Json,
+        description: "Delete a block by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_block_move",
         endpoint: "/api/block/moveBlock",
         kind: ToolKind::Json,
+        description: "Move a block with previousID/parentID anchors.",
+        schema: SCHEMA_BLOCK_MOVE,
     },
     ToolSpec {
         name: "siyuan_block_fold",
         endpoint: "/api/block/foldBlock",
         kind: ToolKind::Json,
+        description: "Fold a block by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_block_unfold",
         endpoint: "/api/block/unfoldBlock",
         kind: ToolKind::Json,
+        description: "Unfold a block by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_block_get_kramdown",
         endpoint: "/api/block/getBlockKramdown",
         kind: ToolKind::Json,
+        description: "Get block kramdown by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_block_get_children",
         endpoint: "/api/block/getChildBlocks",
         kind: ToolKind::Json,
+        description: "List child blocks by parent ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_block_transfer_ref",
         endpoint: "/api/block/transferBlockRef",
         kind: ToolKind::Json,
+        description: "Transfer block references from one def block to another.",
+        schema: SCHEMA_BLOCK_TRANSFER_REF,
     },
     ToolSpec {
         name: "siyuan_attr_set",
         endpoint: "/api/attr/setBlockAttrs",
         kind: ToolKind::Json,
+        description: "Set block attributes.",
+        schema: SCHEMA_ATTR_SET,
     },
     ToolSpec {
         name: "siyuan_attr_get",
         endpoint: "/api/attr/getBlockAttrs",
         kind: ToolKind::Json,
+        description: "Get block attributes by ID.",
+        schema: SCHEMA_ID_ONLY,
     },
     ToolSpec {
         name: "siyuan_sql_query",
         endpoint: "/api/query/sql",
         kind: ToolKind::Json,
+        description: "Execute SQL query against SiYuan database.",
+        schema: SCHEMA_SQL_QUERY,
     },
     ToolSpec {
         name: "siyuan_sql_flush",
         endpoint: "/api/sqlite/flushTransaction",
         kind: ToolKind::Json,
+        description: "Flush the current SQLite transaction. No parameters.",
+        schema: SCHEMA_EMPTY,
     },
     ToolSpec {
         name: "siyuan_template_render",
         endpoint: "/api/template/render",
         kind: ToolKind::Json,
+        description: "Render a template file for a document.",
+        schema: SCHEMA_TEMPLATE_RENDER,
     },
     ToolSpec {
         name: "siyuan_template_render_sprig",
         endpoint: "/api/template/renderSprig",
         kind: ToolKind::Json,
+        description: "Render a Sprig template string.",
+        schema: SCHEMA_TEMPLATE_RENDER_SPRIG,
     },
     ToolSpec {
         name: "siyuan_file_get",
         endpoint: "/api/file/getFile",
         kind: ToolKind::GetFile,
+        description: "Download a file. Returns body_base64 + content_type.",
+        schema: SCHEMA_FILE_PATH,
     },
     ToolSpec {
         name: "siyuan_file_put",
         endpoint: "/api/file/putFile",
         kind: ToolKind::PutFile,
+        description: "Upload a file or create a directory (multipart). Params: path, is_dir, mod_time, file_path.",
+        schema: SCHEMA_FILE_PUT,
     },
     ToolSpec {
         name: "siyuan_file_remove",
         endpoint: "/api/file/removeFile",
         kind: ToolKind::Json,
+        description: "Remove a file by workspace path.",
+        schema: SCHEMA_FILE_PATH,
     },
     ToolSpec {
         name: "siyuan_file_rename",
         endpoint: "/api/file/renameFile",
         kind: ToolKind::Json,
+        description: "Rename a file by workspace path.",
+        schema: SCHEMA_FILE_RENAME,
     },
     ToolSpec {
         name: "siyuan_file_read_dir",
         endpoint: "/api/file/readDir",
         kind: ToolKind::Json,
+        description: "List files in a directory by workspace path.",
+        schema: SCHEMA_FILE_READ_DIR,
     },
     ToolSpec {
         name: "siyuan_export_md",
         endpoint: "/api/export/exportMdContent",
         kind: ToolKind::Json,
+        description: "Export a document as Markdown content by ID.",
+        schema: SCHEMA_EXPORT_MD,
     },
     ToolSpec {
         name: "siyuan_export_resources",
         endpoint: "/api/export/exportResources",
         kind: ToolKind::Json,
+        description: "Export files/folders to a zip; returns zip path.",
+        schema: SCHEMA_EXPORT_RESOURCES,
     },
     ToolSpec {
         name: "siyuan_convert_pandoc",
         endpoint: "/api/convert/pandoc",
         kind: ToolKind::Json,
+        description: "Run pandoc conversion in a temp directory.",
+        schema: SCHEMA_PANDOC,
     },
     ToolSpec {
         name: "siyuan_notify_msg",
         endpoint: "/api/notification/pushMsg",
         kind: ToolKind::Json,
+        description: "Push a normal notification message.",
+        schema: SCHEMA_NOTIFY,
     },
     ToolSpec {
         name: "siyuan_notify_err",
         endpoint: "/api/notification/pushErrMsg",
         kind: ToolKind::Json,
+        description: "Push an error notification message.",
+        schema: SCHEMA_NOTIFY,
     },
     ToolSpec {
         name: "siyuan_network_forward_proxy",
         endpoint: "/api/network/forwardProxy",
         kind: ToolKind::Json,
+        description: "Forward proxy HTTP request through SiYuan.",
+        schema: SCHEMA_NETWORK_FORWARD_PROXY,
     },
     ToolSpec {
         name: "siyuan_system_boot_progress",
         endpoint: "/api/system/bootProgress",
         kind: ToolKind::Json,
+        description: "Get system boot progress. No parameters.",
+        schema: SCHEMA_EMPTY,
     },
     ToolSpec {
         name: "siyuan_system_version",
         endpoint: "/api/system/version",
         kind: ToolKind::Json,
+        description: "Get system version. No parameters.",
+        schema: SCHEMA_EMPTY,
     },
     ToolSpec {
         name: "siyuan_system_current_time",
         endpoint: "/api/system/currentTime",
         kind: ToolKind::Json,
+        description: "Get system current time (ms). No parameters.",
+        schema: SCHEMA_EMPTY,
     },
 ];
 
@@ -546,7 +704,7 @@ async fn main() -> anyhow::Result<()> {
         .version(env!("CARGO_PKG_VERSION"));
 
     for spec in TOOL_SPECS {
-        let tool = SiyuanTool::new(client.clone(), spec.endpoint, spec.kind);
+        let tool = SiyuanTool::new(client.clone(), spec);
         builder = builder.tool(spec.name, tool);
     }
 
