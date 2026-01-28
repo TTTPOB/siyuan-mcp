@@ -13,28 +13,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo Registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/index
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-windows
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Upload Windows Build Artifact
+        uses: actions/upload-artifact@v4
         with:
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release
+          name: windows-siyuan-mcp-binaries
+          path: target/release/siyuan-mcp.exe
 
   build_x86_64-linux-musl:
     name: Build On x86_64-linux-musl
@@ -42,33 +42,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo Registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/index
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-x86_64-linux-musl
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: x86_64-unknown-linux-musl
-          override: true
+          targets: x86_64-unknown-linux-musl
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: cross
-      - uses: actions-rs/cargo@v1
+      - name: Build
+        run: cross build --release --target x86_64-unknown-linux-musl
+      - name: Upload x86_64-linux-musl Build Artifact
+        uses: actions/upload-artifact@v4
         with:
-          use-cross: true
-          command: build
-          args: --release --target x86_64-unknown-linux-musl
+          name: x86_64-linux-musl-siyuan-mcp-binaries
+          path: target/x86_64-unknown-linux-musl/release/siyuan-mcp
 
   build_aarch64-linux-musl:
     name: Build On aarch64-linux-musl
@@ -76,30 +76,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo Registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/index
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache Cargo Build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-aarch64-linux-musl
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: aarch64-unknown-linux-musl
-          override: true
+          targets: aarch64-unknown-linux-musl
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: cross
-      - uses: actions-rs/cargo@v1
+      - name: Build
+        run: cross build --release --target aarch64-unknown-linux-musl
+      - name: Upload aarch64-linux-musl Build Artifact
+        uses: actions/upload-artifact@v4
         with:
-          use-cross: true
-          command: build
-          args: --release --target aarch64-unknown-linux-musl
+          name: aarch64-linux-musl-siyuan-mcp-binaries
+          path: target/aarch64-unknown-linux-musl/release/siyuan-mcp
