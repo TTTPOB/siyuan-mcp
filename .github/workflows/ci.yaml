@@ -37,6 +37,7 @@ jobs:
         with:
           name: windows-siyuan-mcp-binaries
           path: target/release/siyuan-mcp.exe
+        id: upload-windows
 
   build_x86_64-linux-musl:
     name: Build On x86_64-linux-musl
@@ -132,11 +133,17 @@ jobs:
       - name: List Downloaded Artifacts
         run: |
           ls -lhaR
+      - name: Rename Binaries with Architecture Suffix
+        run: |
+          mv ./windows-siyuan-mcp-binaries/siyuan-mcp.exe ./windows-siyuan-mcp-binaries/siyuan-mcp-x86_64-pc-windows-msvc.exe
+          mv ./x86_64-linux-musl-siyuan-mcp-binaries/siyuan-mcp ./x86_64-linux-musl-siyuan-mcp-binaries/siyuan-mcp-x86_64-unknown-linux-musl
+          mv ./aarch64-linux-musl-siyuan-mcp-binaries/siyuan-mcp ./aarch64-linux-musl-siyuan-mcp-binaries/siyuan-mcp-aarch64-unknown-linux-musl
+          ls -lhaR
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ./windows-siyuan-mcp-binaries/siyuan-mcp.exe
-            ./x86_64-linux-musl-siyuan-mcp-binaries/siyuan-mcp
-            ./aarch64-linux-musl-siyuan-mcp-binaries/siyuan-mcp
+            ./windows-siyuan-mcp-binaries/siyuan-mcp-x86_64-pc-windows-msvc.exe
+            ./x86_64-linux-musl-siyuan-mcp-binaries/siyuan-mcp-x86_64-unknown-linux-musl
+            ./aarch64-linux-musl-siyuan-mcp-binaries/siyuan-mcp-aarch64-unknown-linux-musl
           fail_on_unmatched_files: true
